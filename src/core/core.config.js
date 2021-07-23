@@ -128,6 +128,10 @@ export default class Config {
     this._resolverCache = new Map();
   }
 
+  get platform() {
+    return this._config.platform;
+  }
+
   get type() {
     return this._config.type;
   }
@@ -276,7 +280,7 @@ export default class Config {
       keys.forEach(key => addIfFound(scopes, descriptors, key));
     });
 
-    const array = [...scopes];
+    const array = Array.from(scopes);
     if (keysCached.has(keyLists)) {
       cache.set(keyLists, array);
     }

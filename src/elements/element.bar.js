@@ -1,5 +1,5 @@
 import Element from '../core/core.element';
-import {isObject} from '../helpers';
+import {isObject, _limitValue} from '../helpers';
 import {addRoundedRectPath} from '../helpers/helpers.canvas';
 import {toTRBL, toTRBLCorners} from '../helpers/helpers.options';
 
@@ -32,47 +32,13 @@ function getBarBounds(bar, useFinalPosition) {
   return {left, top, right, bottom};
 }
 
-function parseBorderSkipped(bar) {
-  let edge = bar.options.borderSkipped;
-  const res = {};
-
-  if (!edge) {
-    return res;
-  }
-
-  edge = bar.horizontal
-    ? parseEdge(edge, 'left', 'right', bar.base > bar.x)
-    : parseEdge(edge, 'bottom', 'top', bar.base < bar.y);
-
-  res[edge] = true;
-  return res;
-}
-
-function parseEdge(edge, a, b, reverse) {
-  if (reverse) {
-    edge = swap(edge, a, b);
-    edge = startEnd(edge, b, a);
-  } else {
-    edge = startEnd(edge, a, b);
-  }
-  return edge;
-}
-
-function swap(orig, v1, v2) {
-  return orig === v1 ? v2 : orig === v2 ? v1 : orig;
-}
-
-function startEnd(v, start, end) {
-  return v === 'start' ? start : v === 'end' ? end : v;
-}
-
 function skipOrLimit(skip, value, min, max) {
-  return skip ? 0 : Math.max(Math.min(value, max), min);
+  return skip ? 0 : _limitValue(value, min, max);
 }
 
 function parseBorderWidth(bar, maxW, maxH) {
   const value = bar.options.borderWidth;
-  const skip = parseBorderSkipped(bar);
+  const skip = bar.borderSkipped;
   const o = toTRBL(value);
 
   return {
@@ -88,7 +54,7 @@ function parseBorderRadius(bar, maxW, maxH) {
   const value = bar.options.borderRadius;
   const o = toTRBLCorners(value);
   const maxR = Math.min(maxW, maxH);
-  const skip = parseBorderSkipped(bar);
+  const skip = bar.borderSkipped;
 
   // If the value is an object, assume the user knows what they are doing
   // and apply as directed.
@@ -156,6 +122,20 @@ function addNormalRectPath(ctx, rect) {
   ctx.rect(rect.x, rect.y, rect.w, rect.h);
 }
 
+function inflateRect(rect, amount, refRect = {}) {
+  const x = rect.x !== refRect.x ? -amount : 0;
+  const y = rect.y !== refRect.y ? -amount : 0;
+  const w = (rect.x + rect.w !== refRect.x + refRect.w ? amount : 0) - x;
+  const h = (rect.y + rect.h !== refRect.y + refRect.h ? amount : 0) - y;
+  return {
+    x: rect.x + x,
+    y: rect.y + y,
+    w: rect.w + w,
+    h: rect.h + h,
+    radius: rect.radius
+  };
+}
+
 export default class BarElement extends Element {
 
   constructor(cfg) {
@@ -176,20 +156,21 @@ export default class BarElement extends Element {
     const options = this.options;
     const {inner, outer} = boundingRects(this);
     const addRectPath = hasRadius(outer.radius) ? addRoundedRectPath : addNormalRectPath;
+    const inflateAmount = 0.33;
 
     ctx.save();
 
     if (outer.w !== inner.w || outer.h !== inner.h) {
       ctx.beginPath();
-      addRectPath(ctx, outer);
+      addRectPath(ctx, inflateRect(outer, inflateAmount, inner));
       ctx.clip();
-      addRectPath(ctx, inner);
+      addRectPath(ctx, inflateRect(inner, -inflateAmount, outer));
       ctx.fillStyle = options.borderColor;
       ctx.fill('evenodd');
     }
 
     ctx.beginPath();
-    addRectPath(ctx, inner);
+    addRectPath(ctx, inflateRect(inner, inflateAmount, outer));
     ctx.fillStyle = options.backgroundColor;
     ctx.fill();
 

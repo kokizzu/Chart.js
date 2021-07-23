@@ -1,6 +1,6 @@
 import Element from './core.element';
 import {_alignPixel, _measureText, renderText, clipArea, unclipArea} from '../helpers/helpers.canvas';
-import {callback as call, each, finiteOrDefault, isArray, isFinite, isNullOrUndef, isObject} from '../helpers/helpers.core';
+import {callback as call, each, finiteOrDefault, isArray, isFinite, isNullOrUndef, isObject, valueOrDefault} from '../helpers/helpers.core';
 import {toDegrees, toRadians, _int16Range, _limitValue, HALF_PI} from '../helpers/helpers.math';
 import {_alignStartEnd, _toLeftRightCenter} from '../helpers/helpers.extras';
 import {toFont, toPadding, _addGrace} from '../helpers/helpers.options';
@@ -132,16 +132,36 @@ function titleAlign(align, position, reverse) {
 }
 
 function titleArgs(scale, offset, position, align) {
-  const {top, left, bottom, right} = scale;
+  const {top, left, bottom, right, chart} = scale;
+  const {chartArea, scales} = chart;
   let rotation = 0;
   let maxWidth, titleX, titleY;
+  const height = bottom - top;
+  const width = right - left;
 
   if (scale.isHorizontal()) {
     titleX = _alignStartEnd(align, left, right);
-    titleY = offsetFromEdge(scale, position, offset);
+
+    if (isObject(position)) {
+      const positionAxisID = Object.keys(position)[0];
+      const value = position[positionAxisID];
+      titleY = scales[positionAxisID].getPixelForValue(value) + height - offset;
+    } else if (position === 'center') {
+      titleY = (chartArea.bottom + chartArea.top) / 2 + height - offset;
+    } else {
+      titleY = offsetFromEdge(scale, position, offset);
+    }
     maxWidth = right - left;
   } else {
-    titleX = offsetFromEdge(scale, position, offset);
+    if (isObject(position)) {
+      const positionAxisID = Object.keys(position)[0];
+      const value = position[positionAxisID];
+      titleX = scales[positionAxisID].getPixelForValue(value) - width + offset;
+    } else if (position === 'center') {
+      titleX = (chartArea.left + chartArea.right) / 2 - width + offset;
+    } else {
+      titleX = offsetFromEdge(scale, position, offset);
+    }
     titleY = _alignStartEnd(align, bottom, top);
     rotation = position === 'left' ? -HALF_PI : HALF_PI;
   }
@@ -552,14 +572,6 @@ export default class Scale extends Element {
       tick = ticks[i];
       tick.label = call(tickOpts.callback, [tick.value, i, ticks], me);
     }
-    // Ticks should be skipped when callback returns null or undef, so lets remove those.
-    for (i = 0; i < ilen; i++) {
-      if (isNullOrUndef(ticks[i].label)) {
-        ticks.splice(i, 1);
-        ilen--;
-        i--;
-      }
-    }
   }
   afterTickToLabelConversion() {
     call(this.options.afterTickToLabelConversion, [this]);
@@ -601,8 +613,8 @@ export default class Scale extends Element {
 				- tickOpts.padding - getTitleHeight(options.title, me.chart.options.font);
       maxLabelDiagonal = Math.sqrt(maxLabelWidth * maxLabelWidth + maxLabelHeight * maxLabelHeight);
       labelRotation = toDegrees(Math.min(
-        Math.asin(Math.min((labelSizes.highest.height + 6) / tickWidth, 1)),
-        Math.asin(Math.min(maxHeight / maxLabelDiagonal, 1)) - Math.asin(maxLabelHeight / maxLabelDiagonal)
+        Math.asin(_limitValue((labelSizes.highest.height + 6) / tickWidth, -1, 1)),
+        Math.asin(_limitValue(maxHeight / maxLabelDiagonal, -1, 1)) - Math.asin(_limitValue(maxLabelHeight / maxLabelDiagonal, -1, 1))
       ));
       labelRotation = Math.max(minRotation, Math.min(maxRotation, labelRotation));
     }
@@ -768,6 +780,16 @@ export default class Scale extends Element {
     me.beforeTickToLabelConversion();
 
     me.generateTickLabels(ticks);
+
+    // Ticks should be skipped when callback returns null or undef, so lets remove those.
+    let i, ilen;
+    for (i = 0, ilen = ticks.length; i < ilen; i++) {
+      if (isNullOrUndef(ticks[i].label)) {
+        ticks.splice(i, 1);
+        ilen--;
+        i--;
+      }
+    }
 
     me.afterTickToLabelConversion();
   }
@@ -1070,7 +1092,9 @@ export default class Scale extends Element {
       x2 = chartArea.right;
     }
 
-    for (i = 0; i < ticksLength; ++i) {
+    const limit = valueOrDefault(options.ticks.maxTicksLimit, ticksLength);
+    const step = Math.max(1, Math.ceil(ticksLength / limit));
+    for (i = 0; i < ticksLength; i += step) {
       const optsAtIndex = grid.setContext(me.getContext(i));
 
       const lineWidth = optsAtIndex.lineWidth;
@@ -1553,7 +1577,7 @@ export default class Scale extends Element {
     const align = title.align;
     let offset = font.lineHeight / 2;
 
-    if (position === 'bottom') {
+    if (position === 'bottom' || position === 'center' || isObject(position)) {
       offset += padding.bottom;
       if (isArray(title.text)) {
         offset += font.lineHeight * (title.text.length - 1);
@@ -1596,7 +1620,7 @@ export default class Scale extends Element {
     const me = this;
     const opts = me.options;
     const tz = opts.ticks && opts.ticks.z || 0;
-    const gz = opts.grid && opts.grid.z || 0;
+    const gz = valueOrDefault(opts.grid && opts.grid.z, -1);
 
     if (!me._isVisible() || me.draw !== Scale.prototype.draw) {
       // backward compatibility: draw has been overridden by custom scale
@@ -1657,5 +1681,14 @@ export default class Scale extends Element {
   _resolveTickFontOptions(index) {
     const opts = this.options.ticks.setContext(this.getContext(index));
     return toFont(opts.font);
+  }
+
+  /**
+   * @protected
+   */
+  _maxDigits() {
+    const me = this;
+    const fontSize = me._resolveTickFontOptions(0).lineHeight;
+    return (me.isHorizontal() ? me.width : me.height) / fontSize;
   }
 }

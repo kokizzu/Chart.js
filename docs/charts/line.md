@@ -75,7 +75,7 @@ The line chart allows a number of properties to be specified for each dataset. T
 | [`pointHoverRadius`](#interactions) | `number` | Yes | Yes | `4`
 | [`pointRadius`](#point-styling) | `number` | Yes | Yes | `3`
 | [`pointRotation`](#point-styling) | `number` | Yes | Yes | `0`
-| [`pointStyle`](#point-styling) | `string`\|`Image` | Yes | Yes | `'circle'`
+| [`pointStyle`](#point-styling) | `string`\|`Image`\|`HTMLCanvasElement` | Yes | Yes | `'circle'`
 | [`segment`](#segment) | `object` | - | - | `undefined`
 | [`showLine`](#line-styling) | `boolean` | - | - | `true`
 | [`spanGaps`](#line-styling) | `boolean`\|`number` | - | - | `undefined`
@@ -168,6 +168,9 @@ Context for the scriptable segment contains the following properties:
 * `type`: `'segment'`
 * `p0`: first point element
 * `p1`: second point element
+* `p0DataIndex`: index of first point in the data array
+* `p1DataIndex`: index of second point in the data array
+* `datasetIndex`: dataset index
 
 [Example usage](../samples/line/segments.md)
 

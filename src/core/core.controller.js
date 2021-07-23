@@ -2,12 +2,12 @@ import animator from './core.animator';
 import defaults, {overrides} from './core.defaults';
 import Interaction from './core.interaction';
 import layouts from './core.layouts';
-import {BasicPlatform, DomPlatform} from '../platform';
+import {_detectPlatform} from '../platform';
 import PluginService from './core.plugins';
 import registry from './core.registry';
 import Config, {determineAxis, getIndexAxis} from './core.config';
-import {retinaScale} from '../helpers/helpers.dom';
-import {each, callback as callCallback, uid, valueOrDefault, _elementsEqual, isNullOrUndef, setsEqual} from '../helpers/helpers.core';
+import {retinaScale, _isDomSupported} from '../helpers/helpers.dom';
+import {each, callback as callCallback, uid, valueOrDefault, _elementsEqual, isNullOrUndef, setsEqual, defined} from '../helpers/helpers.core';
 import {clearCanvas, clipArea, unclipArea, _isPointInArea} from '../helpers/helpers.canvas';
 // @ts-ignore
 import {version} from '../../package.json';
@@ -44,16 +44,12 @@ function onAnimationProgress(context) {
   callCallback(animationOptions && animationOptions.onProgress, [context], chart);
 }
 
-function isDomSupported() {
-  return typeof window !== 'undefined' && typeof document !== 'undefined';
-}
-
 /**
  * Chart.js can take a string id of a canvas element, a 2d context, or a canvas element itself.
  * Attempt to unwrap the item passed into the chart constructor so that it is a canvas element (if possible).
  */
 function getCanvas(item) {
-  if (isDomSupported() && typeof item === 'string') {
+  if (_isDomSupported() && typeof item === 'string') {
     item = document.getElementById(item);
   } else if (item && item.length) {
     // Support for array based queries (such as jQuery)
@@ -76,10 +72,10 @@ const getChart = (key) => {
 class Chart {
 
   // eslint-disable-next-line max-statements
-  constructor(item, config) {
+  constructor(item, userConfig) {
     const me = this;
 
-    this.config = config = new Config(config);
+    const config = this.config = new Config(userConfig);
     const initialCanvas = getCanvas(item);
     const existingChart = getChart(initialCanvas);
     if (existingChart) {
@@ -91,7 +87,7 @@ class Chart {
 
     const options = config.createResolver(config.chartOptionScopes(), me.getContext());
 
-    this.platform = me._initializePlatform(initialCanvas, config);
+    this.platform = new (config.platform || _detectPlatform(initialCanvas))();
 
     const context = me.platform.acquireContext(initialCanvas, options.aspectRatio);
     const canvas = context && context.canvas;
@@ -116,8 +112,9 @@ class Chart {
     this.chartArea = undefined;
     this._active = [];
     this._lastEvent = undefined;
-    /** @type {{attach?: function, detach?: function, resize?: function}} */
     this._listeners = {};
+    /** @type {?{attach?: function, detach?: function, resize?: function}} */
+    this._responsiveListeners = undefined;
     this._sortedMetasets = [];
     this.scales = {};
     this.scale = undefined;
@@ -205,18 +202,6 @@ class Chart {
     return me;
   }
 
-  /**
-	 * @private
-	 */
-  _initializePlatform(canvas, config) {
-    if (config.platform) {
-      return new config.platform();
-    } else if (!isDomSupported() || (typeof OffscreenCanvas !== 'undefined' && canvas instanceof OffscreenCanvas)) {
-      return new BasicPlatform();
-    }
-    return new DomPlatform();
-  }
-
   clear() {
     clearCanvas(this.canvas, this.ctx);
     return this;
@@ -246,19 +231,14 @@ class Chart {
     const canvas = me.canvas;
     const aspectRatio = options.maintainAspectRatio && me.aspectRatio;
     const newSize = me.platform.getMaximumSize(canvas, width, height, aspectRatio);
-
-    // detect devicePixelRation changes
-    const oldRatio = me.currentDevicePixelRatio;
     const newRatio = options.devicePixelRatio || me.platform.getDevicePixelRatio();
-
-    if (me.width === newSize.width && me.height === newSize.height && oldRatio === newRatio) {
-      return;
-    }
 
     me.width = newSize.width;
     me.height = newSize.height;
     me._aspectRatio = me.aspectRatio;
-    retinaScale(me, newRatio, true);
+    if (!retinaScale(me, newRatio, true)) {
+      return;
+    }
 
     me.notifyPlugins('resize', {size: newSize});
 
@@ -352,23 +332,6 @@ class Chart {
   }
 
   /**
-	 * Updates the given metaset with the given dataset index. Ensures it's stored at that index
-	 * in the _metasets array by swapping with the metaset at that index if necessary.
-	 * @param {Object} meta - the dataset metadata
-	 * @param {number} index - the dataset index
-	 * @private
-	 */
-  _updateMetasetIndex(meta, index) {
-    const metasets = this._metasets;
-    const oldIndex = meta.index;
-    if (oldIndex !== index) {
-      metasets[oldIndex] = metasets[index];
-      metasets[index] = meta;
-      meta.index = index;
-    }
-  }
-
-  /**
 	 * @private
 	 */
   _updateMetasets() {
@@ -377,6 +340,7 @@ class Chart {
     const numData = me.data.datasets.length;
     const numMeta = metasets.length;
 
+    metasets.sort((a, b) => a.index - b.index);
     if (numMeta > numData) {
       for (let i = numData; i < numMeta; ++i) {
         me._destroyDatasetMeta(i);
@@ -422,7 +386,7 @@ class Chart {
       meta.type = type;
       meta.indexAxis = dataset.indexAxis || getIndexAxis(type, me.options);
       meta.order = dataset.order || 0;
-      me._updateMetasetIndex(meta, i);
+      meta.index = i;
       meta.label = '' + dataset.label;
       meta.visible = me.isDatasetVisible(i);
 
@@ -483,8 +447,8 @@ class Chart {
     const existingEvents = new Set(Object.keys(me._listeners));
     const newEvents = new Set(me.options.events);
 
-    if (!setsEqual(existingEvents, newEvents)) {
-      // The events array has changed. Rebind it
+    if (!setsEqual(existingEvents, newEvents) || !!this._responsiveListeners !== me.options.responsive) {
+      // The configured events have changed. Rebind.
       me.unbindEvents();
       me.bindEvents();
     }
@@ -726,6 +690,7 @@ class Chart {
     const me = this;
     const ctx = me.ctx;
     const clip = meta._clip;
+    const useClip = !clip.disabled;
     const area = me.chartArea;
     const args = {
       meta,
@@ -737,16 +702,20 @@ class Chart {
       return;
     }
 
-    clipArea(ctx, {
-      left: clip.left === false ? 0 : area.left - clip.left,
-      right: clip.right === false ? me.width : area.right + clip.right,
-      top: clip.top === false ? 0 : area.top - clip.top,
-      bottom: clip.bottom === false ? me.height : area.bottom + clip.bottom
-    });
+    if (useClip) {
+      clipArea(ctx, {
+        left: clip.left === false ? 0 : area.left - clip.left,
+        right: clip.right === false ? me.width : area.right + clip.right,
+        top: clip.top === false ? 0 : area.top - clip.top,
+        bottom: clip.bottom === false ? me.height : area.bottom + clip.bottom
+      });
+    }
 
     meta.controller.draw();
 
-    unclipArea(ctx);
+    if (useClip) {
+      unclipArea(ctx);
+    }
 
     args.cancelable = false;
     me.notifyPlugins('afterDatasetDraw', args);
@@ -768,7 +737,7 @@ class Chart {
     let meta = metasets.filter(x => x && x._dataset === dataset).pop();
 
     if (!meta) {
-      meta = metasets[datasetIndex] = {
+      meta = {
         type: null,
         data: [],
         dataset: null,
@@ -782,6 +751,7 @@ class Chart {
         _parsed: [],
         _sorted: false
       };
+      metasets.push(meta);
     }
 
     return meta;
@@ -824,25 +794,29 @@ class Chart {
   /**
 	 * @private
 	 */
-  _updateDatasetVisibility(datasetIndex, visible) {
+  _updateVisibility(datasetIndex, dataIndex, visible) {
     const me = this;
     const mode = visible ? 'show' : 'hide';
     const meta = me.getDatasetMeta(datasetIndex);
     const anims = meta.controller._resolveAnimations(undefined, mode);
-    me.setDatasetVisibility(datasetIndex, visible);
 
-    // Animate visible state, so hide animation can be seen. This could be handled better if update / updateDataset returned a Promise.
-    anims.update(meta, {visible});
-
-    me.update((ctx) => ctx.datasetIndex === datasetIndex ? mode : undefined);
+    if (defined(dataIndex)) {
+      meta.data[dataIndex].hidden = !visible;
+      me.update();
+    } else {
+      me.setDatasetVisibility(datasetIndex, visible);
+      // Animate visible state, so hide animation can be seen. This could be handled better if update / updateDataset returned a Promise.
+      anims.update(meta, {visible});
+      me.update((ctx) => ctx.datasetIndex === datasetIndex ? mode : undefined);
+    }
   }
 
-  hide(datasetIndex) {
-    this._updateDatasetVisibility(datasetIndex, false);
+  hide(datasetIndex, dataIndex) {
+    this._updateVisibility(datasetIndex, dataIndex, false);
   }
 
-  show(datasetIndex) {
-    this._updateDatasetVisibility(datasetIndex, true);
+  show(datasetIndex, dataIndex) {
+    this._updateVisibility(datasetIndex, dataIndex, true);
   }
 
   /**
@@ -894,8 +868,45 @@ class Chart {
 	 * @private
 	 */
   bindEvents() {
+    this.bindUserEvents();
+    if (this.options.responsive) {
+      this.bindResponsiveEvents();
+    } else {
+      this.attached = true;
+    }
+  }
+
+  /**
+   * @private
+   */
+  bindUserEvents() {
     const me = this;
     const listeners = me._listeners;
+    const platform = me.platform;
+
+    const _add = (type, listener) => {
+      platform.addEventListener(me, type, listener);
+      listeners[type] = listener;
+    };
+
+    const listener = function(e, x, y) {
+      e.offsetX = x;
+      e.offsetY = y;
+      me._eventHandler(e);
+    };
+
+    each(me.options.events, (type) => _add(type, listener));
+  }
+
+  /**
+   * @private
+   */
+  bindResponsiveEvents() {
+    const me = this;
+    if (!me._responsiveListeners) {
+      me._responsiveListeners = {};
+    }
+    const listeners = me._responsiveListeners;
     const platform = me.platform;
 
     const _add = (type, listener) => {
@@ -909,46 +920,34 @@ class Chart {
       }
     };
 
-    let listener = function(e, x, y) {
-      e.offsetX = x;
-      e.offsetY = y;
-      me._eventHandler(e);
+    const listener = (width, height) => {
+      if (me.canvas) {
+        me.resize(width, height);
+      }
     };
 
-    each(me.options.events, (type) => _add(type, listener));
+    let detached; // eslint-disable-line prefer-const
+    const attached = () => {
+      _remove('attach', attached);
 
-    if (me.options.responsive) {
-      listener = (width, height) => {
-        if (me.canvas) {
-          me.resize(width, height);
-        }
-      };
-
-      let detached; // eslint-disable-line prefer-const
-      const attached = () => {
-        _remove('attach', attached);
-
-        me.attached = true;
-        me.resize();
-
-        _add('resize', listener);
-        _add('detach', detached);
-      };
-
-      detached = () => {
-        me.attached = false;
-
-        _remove('resize', listener);
-        _add('attach', attached);
-      };
-
-      if (platform.isAttached(me.canvas)) {
-        attached();
-      } else {
-        detached();
-      }
-    } else {
       me.attached = true;
+      me.resize();
+
+      _add('resize', listener);
+      _add('detach', detached);
+    };
+
+    detached = () => {
+      me.attached = false;
+
+      _remove('resize', listener);
+      _add('attach', attached);
+    };
+
+    if (platform.isAttached(me.canvas)) {
+      attached();
+    } else {
+      detached();
     }
   }
 
@@ -957,15 +956,16 @@ class Chart {
 	 */
   unbindEvents() {
     const me = this;
-    const listeners = me._listeners;
-    if (!listeners) {
-      return;
-    }
 
-    me._listeners = {};
-    each(listeners, (listener, type) => {
+    each(me._listeners, (listener, type) => {
       me.platform.removeEventListener(me, type, listener);
     });
+    me._listeners = {};
+
+    each(me._responsiveListeners, (listener, type) => {
+      me.platform.removeEventListener(me, type, listener);
+    });
+    me._responsiveListeners = undefined;
   }
 
   updateHoverStyle(items, mode, enabled) {

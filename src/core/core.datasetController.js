@@ -51,7 +51,8 @@ function toClip(value) {
     top: t,
     right: r,
     bottom: b,
-    left: l
+    left: l,
+    disabled: value === false
   };
 }
 
@@ -192,13 +193,20 @@ function createDataContext(parent, index, element) {
 }
 
 function clearStacks(meta, items) {
+  // Not using meta.index here, because it might be already updated if the dataset changed location
+  const datasetIndex = meta.controller.index;
+  const axis = meta.vScale && meta.vScale.axis;
+  if (!axis) {
+    return;
+  }
+
   items = items || meta._parsed;
   for (const parsed of items) {
     const stacks = parsed._stacks;
-    if (!stacks || stacks[meta.vScale.id] === undefined || stacks[meta.vScale.id][meta.index] === undefined) {
+    if (!stacks || stacks[axis] === undefined || stacks[axis][datasetIndex] === undefined) {
       return;
     }
-    delete stacks[meta.vScale.id][meta.index];
+    delete stacks[axis][datasetIndex];
   }
 }
 
@@ -228,6 +236,7 @@ export default class DatasetController {
     this._drawCount = undefined;
     this.enableOptionSharing = false;
     this.$context = undefined;
+    this._syncList = [];
 
     this.initialize();
   }
@@ -242,6 +251,9 @@ export default class DatasetController {
   }
 
   updateIndex(datasetIndex) {
+    if (this.index !== datasetIndex) {
+      clearStacks(this._cachedMeta);
+    }
     this.index = datasetIndex;
   }
 
@@ -316,6 +328,7 @@ export default class DatasetController {
     const me = this;
     const dataset = me.getDataset();
     const data = dataset.data || (dataset.data = []);
+    const _data = me._data;
 
     // In order to correctly handle data addition/deletion animation (an thus simulate
     // real-time charts), we need to monitor these data modifications and synchronize
@@ -323,15 +336,19 @@ export default class DatasetController {
 
     if (isObject(data)) {
       me._data = convertObjectDataToArray(data);
-    } else if (me._data !== data) {
-      if (me._data) {
+    } else if (_data !== data) {
+      if (_data) {
         // This case happens when the user replaced the data array instance.
-        unlistenArrayEvents(me._data, me);
-        clearStacks(me._cachedMeta);
+        unlistenArrayEvents(_data, me);
+        // Discard old parsed data and stacks
+        const meta = me._cachedMeta;
+        clearStacks(meta);
+        meta._parsed = [];
       }
       if (data && Object.isExtensible(data)) {
         listenArrayEvents(data, me);
       }
+      me._syncList = [];
       me._data = data;
     }
   }
@@ -356,6 +373,7 @@ export default class DatasetController {
     me._dataCheck();
 
     // make sure cached _stacked status is current
+    const oldStacked = meta._stacked;
     meta._stacked = isStacked(meta.vScale, meta);
 
     // detect change in stack option
@@ -371,7 +389,7 @@ export default class DatasetController {
     me._resyncElements(resetNewElements);
 
     // if stack changed, update stack values for the whole dataset
-    if (stackChanged) {
+    if (stackChanged || oldStacked !== meta._stacked) {
       updateStacks(me, meta._parsed);
     }
   }
@@ -683,6 +701,9 @@ export default class DatasetController {
 
     for (i = start; i < start + count; ++i) {
       const element = elements[i];
+      if (element.hidden) {
+        continue;
+      }
       if (element.active) {
         active.push(element);
       } else {
@@ -722,10 +743,12 @@ export default class DatasetController {
         (element.$context = createDataContext(me.getContext(), index, element));
       context.parsed = me.getParsed(index);
       context.raw = dataset.data[index];
+      context.index = context.dataIndex = index;
     } else {
       context = me.$context ||
         (me.$context = createDatasetContext(me.chart.getContext(), me.index));
       context.dataset = dataset;
+      context.index = context.datasetIndex = me.index;
     }
 
     context.active = !!active;
@@ -903,18 +926,31 @@ export default class DatasetController {
 	 */
   _resyncElements(resetNewElements) {
     const me = this;
-    const numMeta = me._cachedMeta.data.length;
-    const numData = me._data.length;
+    const data = me._data;
+    const elements = me._cachedMeta.data;
+
+    // Apply changes detected through array listeners
+    for (const [method, arg1, arg2] of me._syncList) {
+      me[method](arg1, arg2);
+    }
+    me._syncList = [];
+
+    const numMeta = elements.length;
+    const numData = data.length;
+    const count = Math.min(numData, numMeta);
+
+    if (count) {
+      // TODO: It is not optimal to always parse the old data
+      // This is done because we are not detecting direct assignments:
+      // chart.data.datasets[0].data[5] = 10;
+      // chart.data.datasets[0].data[5].y = 10;
+      me.parse(0, count);
+    }
 
     if (numData > numMeta) {
       me._insertElements(numMeta, numData - numMeta, resetNewElements);
     } else if (numData < numMeta) {
       me._removeElements(numData, numMeta - numData);
-    }
-    // Re-parse the old elements (new elements are parsed in _insertElements)
-    const count = Math.min(numData, numMeta);
-    if (count) {
-      me.parse(0, count);
     }
   }
 
@@ -973,36 +1009,36 @@ export default class DatasetController {
 	 */
   _onDataPush() {
     const count = arguments.length;
-    this._insertElements(this.getDataset().data.length - count, count);
+    this._syncList.push(['_insertElements', this.getDataset().data.length - count, count]);
   }
 
   /**
 	 * @private
 	 */
   _onDataPop() {
-    this._removeElements(this._cachedMeta.data.length - 1, 1);
+    this._syncList.push(['_removeElements', this._cachedMeta.data.length - 1, 1]);
   }
 
   /**
 	 * @private
 	 */
   _onDataShift() {
-    this._removeElements(0, 1);
+    this._syncList.push(['_removeElements', 0, 1]);
   }
 
   /**
 	 * @private
 	 */
   _onDataSplice(start, count) {
-    this._removeElements(start, count);
-    this._insertElements(start, arguments.length - 2);
+    this._syncList.push(['_removeElements', start, count]);
+    this._syncList.push(['_insertElements', start, arguments.length - 2]);
   }
 
   /**
 	 * @private
 	 */
   _onDataUnshift() {
-    this._insertElements(0, arguments.length);
+    this._syncList.push(['_insertElements', 0, arguments.length]);
   }
 }
 

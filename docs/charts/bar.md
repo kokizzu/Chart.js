@@ -90,7 +90,7 @@ Only the `data` option needs to be specified in the dataset namespace.
 | [`minBarLength`](#styling) | `number` | - | - | |
 | [`label`](#general) | `string` | - | - | `''`
 | [`order`](#general) | `number` | - | - | `0`
-| [`pointStyle`](../configuration/elements.md#point-styles) | `string`\|`Image` | Yes | - | `'circle'`
+| [`pointStyle`](../configuration/elements.md#point-styles) | `string`\|`Image`\|`HTMLCanvasElement` | Yes | - | `'circle'`
 | [`skipNull`](#general) | `boolean` | - | - | |
 | [`stack`](#general) | `string` | - | - | `'bar'` |
 | [`xAxisID`](#general) | `string` | - | - | first x axis
@@ -157,6 +157,7 @@ Options are:
 
 * `'start'`
 * `'end'`
+* `'middle'` (only valid on stacked bars: the borders between bars are skipped)
 * `'bottom'`
 * `'left'`
 * `'top'`
